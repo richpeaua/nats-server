@@ -677,7 +677,7 @@ func (mset *Stream) subscribeInternal(subject string, cb msgHandler) (*subscript
 	mset.sid++
 
 	// Now create the subscription
-	return c.processSub([]byte(subject), nil, []byte(strconv.Itoa(mset.sid)), cb, false)
+	return c.processSub(c.createSub([]byte(subject), nil, []byte(strconv.Itoa(mset.sid)), cb), false)
 }
 
 // Helper for unlocked stream.
