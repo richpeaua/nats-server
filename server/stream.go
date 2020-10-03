@@ -87,6 +87,7 @@ type Stream struct {
 	ddarr     []*ddentry
 	ddindex   int
 	ddtmr     *time.Timer
+	nosubj    bool
 }
 
 // JSPubId is used for identifying published messages and performing de-duplication.
@@ -113,13 +114,17 @@ func (a *Account) AddStream(config *StreamConfig) (*Stream, error) {
 
 // AddStreamWithStore adds a stream for the given account with custome store config options.
 func (a *Account) AddStreamWithStore(config *StreamConfig, fsConfig *FileStoreConfig) (*Stream, error) {
+	return a.addStreamWithStore(config, fsConfig, false)
+}
+
+func (a *Account) addStreamWithStore(config *StreamConfig, fsConfig *FileStoreConfig, noSubjectsOK bool) (*Stream, error) {
 	s, jsa, err := a.checkForJetStream()
 	if err != nil {
 		return nil, err
 	}
 
 	// Sensible defaults.
-	cfg, err := checkStreamCfg(config)
+	cfg, err := checkStreamCfg(config, noSubjectsOK)
 	if err != nil {
 		return nil, err
 	}
@@ -156,7 +161,7 @@ func (a *Account) AddStreamWithStore(config *StreamConfig, fsConfig *FileStoreCo
 
 	// Setup the internal client.
 	c := s.createInternalJetStreamClient()
-	mset := &Stream{jsa: jsa, config: cfg, client: c, consumers: make(map[string]*Consumer)}
+	mset := &Stream{jsa: jsa, config: cfg, client: c, consumers: make(map[string]*Consumer), nosubj: noSubjectsOK}
 	mset.sg = sync.NewCond(&mset.mu)
 
 	jsa.streams[cfg.Name] = mset
@@ -402,7 +407,7 @@ func (jsa *jsAccount) subjectsOverlap(subjects []string) bool {
 	return false
 }
 
-func checkStreamCfg(config *StreamConfig) (StreamConfig, error) {
+func checkStreamCfg(config *StreamConfig, noSubjectOk bool) (StreamConfig, error) {
 	if config == nil {
 		return StreamConfig{}, fmt.Errorf("stream configuration invalid")
 	}
@@ -452,7 +457,9 @@ func checkStreamCfg(config *StreamConfig) (StreamConfig, error) {
 	}
 
 	if len(cfg.Subjects) == 0 {
-		cfg.Subjects = append(cfg.Subjects, cfg.Name)
+		if !noSubjectOk {
+			cfg.Subjects = append(cfg.Subjects, cfg.Name)
+		}
 	} else {
 		// We can allow overlaps, but don't allow direct duplicates.
 		dset := make(map[string]struct{}, len(cfg.Subjects))
@@ -505,7 +512,10 @@ func (mset *Stream) Delete() error {
 
 // Update will allow certain configuration properties of an existing stream to be updated.
 func (mset *Stream) Update(config *StreamConfig) error {
-	cfg, err := checkStreamCfg(config)
+	mset.mu.RLock()
+	nosubj := mset.nosubj
+	mset.mu.RUnlock()
+	cfg, err := checkStreamCfg(config, nosubj)
 	if err != nil {
 		return err
 	}
@@ -874,7 +884,20 @@ func getMsgId(hdr []byte) string {
 }
 
 // processInboundJetStreamMsg handles processing messages bound for a stream.
-func (mset *Stream) processInboundJetStreamMsg(_ *subscription, pc *client, subject, reply string, msg []byte) {
+func (mset *Stream) processInboundJetStreamMsg(sub *subscription, pc *client, subject, reply string, msg []byte) {
+	// This is invoked from processInboundClientMsg and we want to suppress
+	// messages that come from an MQTT client with a QoS > 0, because they
+	// have been already handled.
+	if pc != nil && pc.mqtt != nil && mqttGetQoS(pc.mqtt.pp.flags) > 0 {
+		return
+	}
+	mset.directProcessInboundJetStreamMsg(sub, pc, subject, reply, msg)
+}
+
+// directProcessInboundJetStreamMsg handles processing messages bound for a stream.
+// It is either invoked from processInboundClientMsg or directly when processing
+// a published message from a MQTT connection with QoS > 0.
+func (mset *Stream) directProcessInboundJetStreamMsg(_ *subscription, pc *client, subject, reply string, msg []byte) {
 	mset.mu.Lock()
 	store := mset.store
 	c := mset.client

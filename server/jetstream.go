@@ -521,7 +521,12 @@ func (a *Account) EnableJetStream(limits *JetStreamAccountLimits) error {
 				s.Warnf("  Error adding Stream %q to Template %q: %v", cfg.Name, cfg.Template, err)
 			}
 		}
-		mset, err := a.AddStream(&cfg.StreamConfig)
+		// TODO: We should not rely on the stream name.
+		// However, having a StreamConfig property, such as AllowNoSubject,
+		// was not accepted because it does not make sense outside of the
+		// MQTT use-case. So need to revisit this.
+		mqtt := cfg.StreamConfig.Name == mqttStreamName
+		mset, err := a.addStreamWithStore(&cfg.StreamConfig, nil, mqtt)
 		if err != nil {
 			s.Warnf("  Error recreating Stream %q: %v", cfg.Name, err)
 			continue
@@ -566,7 +571,7 @@ func (a *Account) EnableJetStream(limits *JetStreamAccountLimits) error {
 				// the consumer can reconnect. We will create it as a durable and switch it.
 				cfg.ConsumerConfig.Durable = ofi.Name()
 			}
-			obs, err := mset.AddConsumer(&cfg.ConsumerConfig)
+			obs, err := mset.addConsumerCheckInterest(&cfg.ConsumerConfig, !mqtt)
 			if err != nil {
 				s.Warnf("    Error adding Consumer: %v", err)
 				continue
@@ -1018,7 +1023,7 @@ func (a *Account) AddStreamTemplate(tc *StreamTemplateConfig) (*StreamTemplate, 
 	// FIXME(dlc) - Hacky
 	tcopy := tc.deepCopy()
 	tcopy.Config.Name = "_"
-	cfg, err := checkStreamCfg(tcopy.Config)
+	cfg, err := checkStreamCfg(tcopy.Config, false)
 	if err != nil {
 		return nil, err
 	}
